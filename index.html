@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wi-Fi Speed Heatmap</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    #map { height: 80vh; width: 100%; }
+    #controls { padding: 1rem; text-align: center; display: flex; justify-content: center; flex-wrap: wrap; gap: 1rem; }
+    button, select { background-color: #4CAF50; color: white; border: none; padding: 0.5rem; cursor: pointer; }
+    #legend { margin-top: 0.5rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button onclick="downloadCSV()">Download CSV</button>
+    <button onclick="clearData()">Clear All Data</button>
+    <select id="modeSelect" onchange="changeMode()">
+      <option value="download">Download Speed</option>
+      <option value="upload">Upload Speed</option>
+    </select>
+    <div id="average">Avg DL: -- Mbps, Avg UL: -- Mbps</div>
+    <div id="legend">⬤ Red = slow | 🟡 = medium | 🟢 Green = fast | Gray = no data</div>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/librespeed/speedtest.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+
+  <script>
+    let map = L.map('map').setView([0, 0], 2);
+    let results = JSON.parse(localStorage.getItem("wifiSpeedData")) || [];
+    let heatPoints = [];
+    let currentMode = 'download';
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data © <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    let heatLayer = L.heatLayer([], { radius: 25, maxZoom: 18, blur: 15 }).addTo(map);
+
+    if (results.length > 0) {
+      results.forEach(({ lat, lon, download }) => {
+        const intensity = normalizeSpeed(download);
+        if (intensity !== null) heatPoints.push([lat, lon, intensity]);
+      });
+      heatLayer.setLatLngs(heatPoints);
+    }
+
+    navigator.geolocation.getCurrentPosition(pos => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      map.setView([lat, lon], 17);
+      runTestAt(lat, lon);
+    });
+
+    function normalizeSpeed(speed) {
+      if (speed < 5) return null;
+      return Math.min(1, speed / 100);
+    }
+
+    function getColorForSpeed(speed) {
+      const normalized = normalizeSpeed(speed);
+      if (normalized === null) return '#808080';
+      const r = Math.round(255 * (1 - normalized));
+      const g = Math.round(255 * normalized);
+      return `rgb(${r}, ${g}, 0)`;
+    }
+
+    function updateAverages() {
+      if (results.length === 0) return;
+      const totalDL = results.reduce((sum, r) => sum + parseFloat(r.download), 0);
+      const totalUL = results.reduce((sum, r) => sum + parseFloat(r.upload), 0);
+      const avgDL = (totalDL / results.length).toFixed(1);
+      const avgUL = (totalUL / results.length).toFixed(1);
+      document.getElementById("average").innerText = `Avg DL: ${avgDL} Mbps, Avg UL: ${avgUL} Mbps`;
+    }
+
+    function runTestAt(lat, lon) {
+      const test = new Speedtest();
+      test.setParameter("telemetry_level", "basic");
+
+      test.onupdate = data => {
+        if (data.testState === 4) {
+          const download = parseFloat(data.dlStatus).toFixed(2);
+          const upload = parseFloat(data.ulStatus).toFixed(2);
+          const time = new Date().toLocaleString();
+          const result = { time, lat, lon, download, upload };
+          results.push(result);
+          localStorage.setItem("wifiSpeedData", JSON.stringify(results));
+
+          const value = currentMode === 'download' ? download : upload;
+          const intensity = normalizeSpeed(value);
+          if (intensity !== null) {
+            heatPoints.push([lat, lon, intensity]);
+            heatLayer.setLatLngs(heatPoints);
+          }
+
+          const color = getColorForSpeed(value);
+          L.circleMarker([lat, lon], {
+            radius: 6,
+            color: '#000',
+            fillColor: color,
+            fillOpacity: 0.8
+          }).addTo(map).bindPopup(
+            `<b>${time}</b><br>Download: ${download} Mbps<br>Upload: ${upload} Mbps`
+          );
+
+          updateAverages();
+        }
+      };
+
+      test.start();
+    }
+
+    function runTest() {
+      navigator.geolocation.getCurrentPosition(position => {
+        runTestAt(position.coords.latitude, position.coords.longitude);
+      }, err => {
+        alert("Failed to get location. Please enable GPS.");
+      });
+    }
+
+    function clearData() {
+      results = [];
+      heatPoints = [];
+      localStorage.removeItem("wifiSpeedData");
+      heatLayer.setLatLngs([]);
+      document.getElementById("average").innerText = "Avg DL: -- Mbps, Avg UL: -- Mbps";
+    }
+
+    function changeMode() {
+      currentMode = document.getElementById("modeSelect").value;
+      heatPoints = [];
+      results.forEach(({ lat, lon, download, upload }) => {
+        const value = currentMode === 'download' ? download : upload;
+        const intensity = normalizeSpeed(value);
+        if (intensity !== null) heatPoints.push([lat, lon, intensity]);
+      });
+      heatLayer.setLatLngs(heatPoints);
+    }
+
+    setInterval(runTest, 10000);
+    updateAverages();
+
+    // PWA install prompt
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js');
+      });
+    }
+  </script>
+</body>
+</html>
